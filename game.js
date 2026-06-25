@@ -25,7 +25,12 @@
     lastEvent: "",
     soundOn: localStorage.getItem(STORAGE_KEYS.sound) !== "off",
     pending: false,
-    rooms: []
+    rooms: [],
+    typing: null,
+    events: [],
+    eventSeen: new Set(),
+    typingSendTimer: null,
+    lastTypingDraft: ""
   };
 
   init();
@@ -111,6 +116,8 @@
     $("startGameBtn").addEventListener("click", startGame);
     $("wordForm").addEventListener("submit", submitWord);
     $("overlayWordForm").addEventListener("submit", submitOverlayWord);
+    $("wordInput").addEventListener("input", () => queueTyping($("wordInput").value));
+    $("overlayWordInput").addEventListener("input", () => queueTyping($("overlayWordInput").value));
     $("passTurnBtn").addEventListener("click", passTurn);
     $("overlayPassBtn").addEventListener("click", passTurn);
     $("chatForm").addEventListener("submit", sendChat);
@@ -133,6 +140,8 @@
     s.on("connect_error", (err) => { console.warn(err); setConnection(false, "Chưa kết nối được Render"); });
     s.on("rooms:update", data => renderOpenRooms(data.rooms || []));
     s.on("room:state", snapshot => renderState(snapshot));
+    s.on("room:event", event => handleRoomEvent(event));
+    s.on("turn:typing", typing => { state.typing = typing || null; renderLiveStatusPanel(); });
     s.on("chat:update", data => { state.chat = data.chat || []; renderChat(); });
     s.on("reaction:new", data => spawnReaction(data.emoji || "👏"));
     s.on("dictionary:customWord", data => { if (data?.word) state.dictSet.add(data.word); $("dictStatus").textContent = `đã tải ${state.dictSet.size.toLocaleString("vi-VN")} từ`; });
@@ -196,8 +205,9 @@
 
   async function leaveRoom() {
     try { if (state.roomCode) await emit("room:leave", { roomCode: state.roomCode, playerId: state.playerId }, 1200, true); } catch(_) {}
-    state.roomCode = ""; state.room = null; state.chain = []; state.chat = [];
+    state.roomCode = ""; state.room = null; state.chain = []; state.chat = []; state.typing = null; state.events = [];
     stopCountdown();
+    $("liveStatusPanel")?.classList.add("hidden");
     $("roomScreen").classList.add("hidden"); $("lobbyScreen").classList.remove("hidden");
     if (location.protocol !== "file:") { const url = new URL(location.href); url.searchParams.delete("room"); history.replaceState({}, "", url); }
     requestRooms();
@@ -213,16 +223,19 @@
     const word = normalizeWord(input.value);
     if (!word) return;
     if (!isMyTurn()) return toast("Chưa đến lượt bạn.", "error");
-    const req = requiredLetter();
-    if (req && word[0] !== req) return showBigEvent(`Từ phải bắt đầu bằng chữ ${req.toUpperCase()}.`, "error");
-    if (state.dictLoaded && !state.dictSet.has(word)) return showBigEvent(`Từ “${word}” chưa có trong JSON. Có thể bấm Thêm từ nếu đúng.`, "error");
     setWordControls(true);
-    showBigEvent("Đang gửi từ lên Render...", "info");
+    queueTyping("");
+    showBigEvent("Đang gửi từ lên Render để mọi người cùng thấy kết quả...", "info");
     try {
       const res = await emit("word:submit", { roomCode: state.roomCode, playerId: state.playerId, word }, 10000);
       renderState(res.state);
-      input.value = ""; $("wordInput").value = ""; $("overlayWordInput").value = "";
-      showBigEvent(res.message, res.accepted ? "success" : "error");
+      if (res.accepted) {
+        input.value = ""; $("wordInput").value = ""; $("overlayWordInput").value = "";
+      } else if (res.retry) {
+        input.focus();
+        input.select?.();
+      }
+      showBigEvent(res.message, res.accepted ? "success" : (res.retry ? "info" : "error"));
       playTone(res.accepted ? "success" : "error");
     } finally { setWordControls(false); }
   }
@@ -230,6 +243,7 @@
   async function passTurn() {
     if (!isMyTurn()) return toast("Chưa đến lượt bạn.", "error");
     setWordControls(true);
+    queueTyping("");
     try {
       const res = await emit("turn:pass", { roomCode: state.roomCode, playerId: state.playerId });
       renderState(res.state); showBigEvent(res.message, "error"); playTone("error");
@@ -286,8 +300,10 @@
     state.players = snapshot.players || [];
     state.chain = snapshot.chain || [];
     state.chat = snapshot.chat || [];
+    state.events = snapshot.events || state.events || [];
+    state.typing = snapshot.typing || state.typing || null;
     state.lastVersion = Number(state.room.version || 0);
-    renderHeader(); renderPreGame(); renderTurn(); renderTurnOverlay(); renderChain(); renderPlayers(); renderChat(); reactToEvent();
+    renderHeader(); renderPreGame(); renderTurn(); renderTurnOverlay(); renderChain(); renderPlayers(); renderChat(); renderLiveStatusPanel(); renderEventHistory(); reactToEvent();
   }
 
   function renderHeader() {
@@ -346,8 +362,11 @@
 
   function renderChain() {
     const box = $("chainWords");
-    box.innerHTML = state.chain.filter(w => w.valid).map((w, idx) => `<div class="chain-word" title="${escapeAttr(w.nickname || "")}">${idx > 0 ? `<span class="arrow">→</span>` : ""}<span class="word-text">${escapeHtml(w.word)}</span></div>`).join("");
-    box.scrollLeft = box.scrollWidth;
+    const validWords = state.chain.filter(w => w.valid);
+    box.innerHTML = validWords.map((w, idx) => `<div class="chain-word compact" title="${escapeAttr((w.nickname || "") + " · #" + (idx + 1))}"><span class="chain-index">${idx + 1}</span><span class="word-text">${escapeHtml(w.word)}</span></div>`).join("");
+    const count = $("chainCountText");
+    if (count) count.textContent = `${validWords.length} từ đã dùng · cuộn để rà lại`;
+    box.scrollTop = box.scrollHeight;
   }
 
   function renderPlayers() {
@@ -373,6 +392,75 @@
     list.scrollTop = list.scrollHeight;
   }
 
+  function currentActorText() {
+    const r = state.room;
+    if (!r) return "---";
+    if (r.mode === "team") return `Đội ${r.currentTeam || "-"}`;
+    const p = state.players.find(x => x.playerId === r.currentTurnPlayerId);
+    return p ? `${p.avatar || "🙂"} ${p.nickname || "Người chơi"}` : "---";
+  }
+
+  function renderLiveStatusPanel() {
+    const panel = $("liveStatusPanel");
+    const r = state.room;
+    if (!panel || !r || r.status !== "playing") { panel?.classList.add("hidden"); return; }
+    panel.classList.remove("hidden");
+    const leftMs = Math.max(0, Number(r.turnDeadlineAt || 0) - Date.now());
+    const typingFresh = state.typing && Date.now() - Number(state.typing.updatedAt || 0) < 2800;
+    $("liveTurnOwner").textContent = currentActorText();
+    $("liveTimerMini").textContent = `${Math.ceil(leftMs / 1000)}s`;
+    $("liveCurrentWord").textContent = r.currentWord || "---";
+    $("liveRequiredLetter").textContent = (requiredLetter() || "-").toUpperCase();
+    $("liveTypingLine").textContent = typingFresh
+      ? `${state.typing.avatar || "🙂"} ${state.typing.nickname || "Người chơi"} đang gõ: ${state.typing.draft || "..."}`
+      : `${currentActorText()} đang suy nghĩ...`;
+    const last = (state.events || []).slice(-1)[0];
+    $("liveEventLine").textContent = last ? last.message : (r.lastEvent || "Chưa có sự kiện.");
+  }
+
+  function renderEventHistory() {
+    (state.events || []).slice(-8).forEach(ev => {
+      if (!state.eventSeen.has(ev.id) && Date.now() - Number(ev.createdAt || 0) < 5000) handleRoomEvent(ev);
+    });
+  }
+
+  function handleRoomEvent(event) {
+    if (!event || !event.id || state.eventSeen.has(event.id)) return;
+    state.eventSeen.add(event.id);
+    if (state.eventSeen.size > 400) state.eventSeen = new Set([...state.eventSeen].slice(-200));
+    const type = event.type || "info";
+    const level = /score|start|round|final/i.test(type) ? "success" : /invalid/i.test(type) ? "info" : /penalty|error/i.test(type) ? "error" : "info";
+    showBigEvent(event.message || "Có cập nhật mới.", level);
+    showScorePopup(event, level);
+    if (level === "success") playTone("success");
+    else if (level === "error") playTone("error");
+    renderLiveStatusPanel();
+  }
+
+  function showScorePopup(event, level="info") {
+    const host = $("scorePopupHost");
+    if (!host) return;
+    const el = document.createElement("div");
+    el.className = `score-popup ${level}`;
+    const delta = Number(event.scoreDelta || 0);
+    const deltaText = delta > 0 ? `+${delta}` : delta < 0 ? `${delta}` : "";
+    const title = event.type === "final" ? "🏆 Kết thúc trận" : event.type === "round" ? "🔁 Sang vòng mới" : `${event.avatar || "🔔"} ${escapeHtml(event.nickname || "Thông báo")} ${deltaText}`;
+    el.innerHTML = `<strong>${title}</strong><span>${escapeHtml(event.message || "")}</span>`;
+    host.appendChild(el);
+    setTimeout(() => el.remove(), event.type === "final" ? 6500 : 4200);
+  }
+
+  function queueTyping(value) {
+    if (!state.roomCode || !isMyTurn() || !state.socket?.connected) return;
+    const draft = normalizeWord(value || "").slice(0, 32);
+    if (draft === state.lastTypingDraft && draft !== "") return;
+    state.lastTypingDraft = draft;
+    clearTimeout(state.typingSendTimer);
+    state.typingSendTimer = setTimeout(() => {
+      emit("word:typing", { roomCode: state.roomCode, playerId: state.playerId, draft }, 1200, true).catch(()=>{});
+    }, draft ? 180 : 0);
+  }
+
   function startCountdown() { stopCountdown(); updateCountdown(); state.countdownTimer = setInterval(updateCountdown, 200); }
   function stopCountdown() { if (state.countdownTimer) clearInterval(state.countdownTimer); state.countdownTimer = null; }
   function updateCountdown() {
@@ -381,6 +469,7 @@
     const turnMs = Math.max(1, Number(r.turnSeconds || 30) * 1000);
     const leftMs = Math.max(0, Number(r.turnDeadlineAt || 0) - Date.now());
     setTimerDisplay(String(Math.ceil(leftMs / 1000)), Math.max(0, Math.min(100, leftMs / turnMs * 100)));
+    renderLiveStatusPanel();
   }
   function setTimerDisplay(text, pct) { $("timerNumber").textContent = text; $("timerBar").style.width = `${pct}%`; $("overlayTimerNumber").textContent = text; $("overlayTimerBar").style.width = `${pct}%`; }
 

@@ -16,6 +16,8 @@ const ROOM_EMPTY_DELETE_MS = 60_000;
 const DISCONNECT_GRACE_MS = 15_000;
 const MAX_CHAT_PER_ROOM = 120;
 const MAX_ROOMS_PUBLIC = 80;
+const MAX_EVENTS_PER_ROOM = 90;
+const TYPING_VISIBLE_MS = 2500;
 
 const app = express();
 app.use(cors({ origin: CLIENT_ORIGIN === "*" ? true : CLIENT_ORIGIN.split(",").map(s => s.trim()) }));
@@ -94,6 +96,8 @@ io.on("connection", (socket) => {
     const room = getRoomOrThrow(cleanRoom(payload?.roomCode));
     assertHost(room, payload?.playerId);
     startGame(room);
+    const ev = addRoomEvent(room, "start", "Trận đấu đã bắt đầu.", {});
+    emitRoomEvents(room, [ev]);
     emitRoomsList();
     emitState(room.roomCode, "Trận đấu đã bắt đầu.");
     cbOk(cb, { state: serializeRoom(room) });
@@ -116,14 +120,33 @@ io.on("connection", (socket) => {
     const player = getPlayerOrThrow(room, payload?.playerId);
     const word = normalizeWord(payload?.word);
     const result = submitWord(room, player, word, receivedAt);
+    emitRoomEvents(room, result.events || []);
     emitState(room.roomCode, result.message);
     cbOk(cb, { ...result, state: serializeRoom(room) });
+  }));
+
+  socket.on("word:typing", (payload, cb) => safe(socket, cb, () => {
+    const room = getRoomOrThrow(cleanRoom(payload?.roomCode));
+    const player = getPlayerOrThrow(room, payload?.playerId);
+    if (room.status !== "playing" || !isPlayersTurn(room, player)) return cbOk(cb, { ok: true, ignored: true });
+    const draft = normalizeWord(payload?.draft || "").slice(0, 32);
+    room.typing = {
+      playerId: player.playerId,
+      nickname: player.nickname,
+      avatar: player.avatar,
+      draft,
+      updatedAt: Date.now(),
+      turnDeadlineAt: room.turnDeadlineAt
+    };
+    io.to(room.roomCode).emit("turn:typing", room.typing);
+    cbOk(cb, { ok: true });
   }));
 
   socket.on("turn:pass", (payload, cb) => safe(socket, cb, () => {
     const room = getRoomOrThrow(cleanRoom(payload?.roomCode));
     const player = getPlayerOrThrow(room, payload?.playerId);
     const result = passTurn(room, player);
+    emitRoomEvents(room, result.events || []);
     emitState(room.roomCode, result.message);
     cbOk(cb, { ...result, state: serializeRoom(room) });
   }));
@@ -221,6 +244,8 @@ function createRoom(roomCode, payload, hostId, nickname, avatar, socketId) {
     chain: [],
     chat: [],
     reactions: [],
+    events: [],
+    typing: null,
     lastEvent: "Phòng đã tạo.",
     version: 1,
     createdAt: now,
@@ -298,11 +323,13 @@ function systemWord(word) {
 function startTurnClock(room) {
   clearRoomTimer(room);
   const now = Date.now();
+  room.typing = null;
   room.turnStartedAt = now;
   room.turnDeadlineAt = now + room.turnSeconds * 1000;
   room.updatedAt = now;
   room.version++;
   room.timer = setTimeout(() => onTurnTimeout(room.roomCode), room.turnSeconds * 1000 + 350);
+  io.to(room.roomCode).emit("turn:typing", null);
   scheduleBotIfNeeded(room);
 }
 
@@ -328,24 +355,28 @@ function onTurnTimeout(roomCode) {
   const room = rooms.get(roomCode);
   if (!room || room.status !== "playing") return;
   const player = getCurrentActorPlayer(room);
+  const events = [];
   if (player) {
     player.score -= 1;
     player.penalty += 1;
     room.chain.push({ id: makeId("W"), word: "[timeout]", playerId: player.playerId, nickname: player.nickname, avatar: player.avatar, valid: false, scoreDelta: -1, createdAt: Date.now() });
+    events.push(addRoomEvent(room, "penalty", `Hết giờ: ${player.nickname} bị trừ 1 điểm.`, { playerId: player.playerId, nickname: player.nickname, avatar: player.avatar, scoreDelta: -1, score: player.score }));
   }
-  advanceTurn(room, `Hết giờ: ${player ? player.nickname : "người chơi"} bị trừ 1 điểm.`);
+  const finalEvent = advanceTurn(room, `Hết giờ: ${player ? player.nickname : "người chơi"} bị trừ 1 điểm.`);
+  if (finalEvent) events.push(finalEvent);
+  emitRoomEvents(room, events);
   emitState(room.roomCode, room.lastEvent);
 }
 
 function submitWord(room, player, word, receivedAt) {
   if (room.status !== "playing") throw new Error("Trận chưa bắt đầu hoặc đã kết thúc.");
   if (!isPlayersTurn(room, player)) throw new Error("Chưa đến lượt bạn.");
-  if (!word || word.length < 3) return invalidWord(room, player, word, "Từ cần tối thiểu 3 chữ cái.");
-  if (receivedAt > room.turnDeadlineAt + 1200) return invalidWord(room, player, word, "Đã hết giờ trước khi server nhận được từ.");
+  if (!word || word.length < 3) return invalidWord(room, player, word, "Từ cần tối thiểu 3 chữ cái.", receivedAt);
+  if (receivedAt > room.turnDeadlineAt + 1200) return invalidWord(room, player, word, "Server nhận từ sau khi hết giờ. Đồng hồ sẽ xử lý phạt nếu lượt đã quá hạn.", receivedAt);
   const req = requiredLetter(room);
-  if (req && word[0] !== req) return invalidWord(room, player, word, `Từ phải bắt đầu bằng chữ ${req.toUpperCase()}.`);
-  if (room.usedWords.has(word)) return invalidWord(room, player, word, "Từ này đã được dùng trong chuỗi.");
-  if (!dictionary.words.has(word)) return invalidWord(room, player, word, "Từ này chưa có trong từ điển JSON.");
+  if (req && word[0] !== req) return invalidWord(room, player, word, `Từ phải bắt đầu bằng chữ ${req.toUpperCase()}.`, receivedAt);
+  if (room.usedWords.has(word)) return invalidWord(room, player, word, "Từ này đã được dùng trong chuỗi.", receivedAt);
+  if (!dictionary.words.has(word)) return invalidWord(room, player, word, "Từ này chưa có trong từ điển JSON.", receivedAt);
 
   const leftMs = Math.max(0, room.turnDeadlineAt - receivedAt);
   const bonus = leftMs > room.turnSeconds * 1000 * 0.65 ? 2 : leftMs > room.turnSeconds * 1000 * 0.35 ? 1 : 0;
@@ -354,17 +385,25 @@ function submitWord(room, player, word, receivedAt) {
   player.validCount += 1;
   room.usedWords.add(word);
   room.currentWord = word;
+  room.typing = null;
   room.chain.push({ id: makeId("W"), word, playerId: player.playerId, nickname: player.nickname, avatar: player.avatar, valid: true, scoreDelta, createdAt: Date.now() });
-  advanceTurn(room, `Đúng: ${player.nickname} +${scoreDelta} điểm với từ “${word}”.`);
-  return { accepted: true, scoreDelta, message: room.lastEvent };
+  const msg = `Đúng: ${player.nickname} +${scoreDelta} điểm với từ “${word}”.`;
+  const events = [addRoomEvent(room, "score", msg, { playerId: player.playerId, nickname: player.nickname, avatar: player.avatar, word, scoreDelta, score: player.score })];
+  const finalEvent = advanceTurn(room, msg);
+  if (finalEvent) events.push(finalEvent);
+  return { accepted: true, retry: false, scoreDelta, message: room.lastEvent, events };
 }
 
-function invalidWord(room, player, word, reason) {
-  player.score -= 1;
-  player.penalty += 1;
-  room.chain.push({ id: makeId("W"), word: word || "[blank]", playerId: player.playerId, nickname: player.nickname, avatar: player.avatar, valid: false, scoreDelta: -1, reason, createdAt: Date.now() });
-  advanceTurn(room, `Sai: ${player.nickname} bị trừ 1 điểm. ${reason}`);
-  return { accepted: false, scoreDelta: -1, message: room.lastEvent };
+function invalidWord(room, player, word, reason, receivedAt = Date.now()) {
+  const leftSeconds = Math.max(0, Math.ceil((room.turnDeadlineAt - receivedAt) / 1000));
+  const msg = leftSeconds > 0
+    ? `Sai: ${player.nickname} nhập “${word || "trống"}”. ${reason} Còn ${leftSeconds} giây để sửa, chưa bị trừ điểm.`
+    : `Sai: ${player.nickname} nhập “${word || "trống"}”. ${reason} Đã hết giờ hoặc gần hết giờ.`;
+  room.lastEvent = msg;
+  room.updatedAt = Date.now();
+  room.version++;
+  const ev = addRoomEvent(room, "invalid", msg, { playerId: player.playerId, nickname: player.nickname, avatar: player.avatar, word: word || "", reason, scoreDelta: 0, score: player.score, retry: leftSeconds > 0 });
+  return { accepted: false, retry: leftSeconds > 0, scoreDelta: 0, message: msg, events: [ev] };
 }
 
 function passTurn(room, player, silent = false) {
@@ -372,9 +411,13 @@ function passTurn(room, player, silent = false) {
   if (!isPlayersTurn(room, player) && !silent) throw new Error("Chưa đến lượt bạn.");
   player.score -= 1;
   player.penalty += 1;
+  room.typing = null;
   room.chain.push({ id: makeId("W"), word: "[pass]", playerId: player.playerId, nickname: player.nickname, avatar: player.avatar, valid: false, scoreDelta: -1, reason: "Bỏ qua lượt", createdAt: Date.now() });
-  advanceTurn(room, `${player.nickname} bỏ qua lượt và bị trừ 1 điểm.`);
-  return { accepted: false, scoreDelta: -1, message: room.lastEvent };
+  const msg = `${player.nickname} bỏ qua lượt và bị trừ 1 điểm.`;
+  const events = [addRoomEvent(room, "penalty", msg, { playerId: player.playerId, nickname: player.nickname, avatar: player.avatar, scoreDelta: -1, score: player.score })];
+  const finalEvent = advanceTurn(room, msg);
+  if (finalEvent) events.push(finalEvent);
+  return { accepted: false, retry: false, scoreDelta: -1, message: room.lastEvent, events };
 }
 
 function advanceTurn(room, message) {
@@ -386,21 +429,25 @@ function advanceTurn(room, message) {
   if (room.roundMode !== "infinite" && room.turnsCompletedInRound >= room.roundActorCount) {
     if (room.currentRound >= room.totalRounds) {
       room.status = "ended";
+      room.typing = null;
       room.lastEvent = `Kết thúc trận. ${winnerText(room)}`;
       room.updatedAt = Date.now();
       room.version++;
-      return;
+      return addRoomEvent(room, "final", room.lastEvent, { winners: getFinalRanking(room).slice(0, 5) });
     }
     room.currentRound += 1;
     room.turnsCompletedInRound = 0;
+    addRoomEvent(room, "round", `Bắt đầu vòng ${room.currentRound}/${room.totalRounds}.`, { currentRound: room.currentRound, totalRounds: room.totalRounds });
   } else if (room.roundMode === "infinite" && room.turnsCompletedInRound >= room.roundActorCount) {
     room.currentRound += 1;
     room.turnsCompletedInRound = 0;
+    addRoomEvent(room, "round", `Bắt đầu vòng ${room.currentRound}.`, { currentRound: room.currentRound });
   }
 
   setNextActor(room, actors);
   room.lastEvent = message;
   startTurnClock(room);
+  return null;
 }
 
 function getTurnActors(room) {
@@ -456,9 +503,15 @@ function pickBotWord(letter, usedWords) {
 }
 
 function winnerText(room) {
-  const players = [...room.players.values()].sort((a, b) => b.score - a.score);
+  const players = getFinalRanking(room);
   const w = players[0];
   return w ? `Người thắng: ${w.avatar} ${w.nickname} (${w.score} điểm).` : "Không có người thắng.";
+}
+function getFinalRanking(room) {
+  return [...room.players.values()]
+    .filter(p => p.type === "human" || p.type === "bot")
+    .sort((a, b) => b.score - a.score || a.orderIndex - b.orderIndex)
+    .map(p => ({ playerId: p.playerId, nickname: p.nickname, avatar: p.avatar, score: p.score, validCount: p.validCount, penalty: p.penalty }));
 }
 
 function endRoom(room, message) {
@@ -520,6 +573,17 @@ function checkRoomEmpty(room) {
 function cancelEmptyDelete(room) {
   if (room.emptyTimer) clearTimeout(room.emptyTimer);
   room.emptyTimer = null;
+}
+
+function addRoomEvent(room, type, message, extra = {}) {
+  const event = { id: makeId("E"), type, message, createdAt: Date.now(), ...extra };
+  room.events.push(event);
+  if (room.events.length > MAX_EVENTS_PER_ROOM) room.events.splice(0, room.events.length - MAX_EVENTS_PER_ROOM);
+  return event;
+}
+
+function emitRoomEvents(room, events = []) {
+  events.filter(Boolean).forEach(ev => io.to(room.roomCode).emit("room:event", ev));
 }
 
 function emitState(roomCode, eventMsg = "") {
@@ -586,8 +650,10 @@ function serializeRoom(room) {
       updatedAt: room.updatedAt
     },
     players: room.playerOrder.map(id => room.players.get(id)).filter(Boolean).map(p => ({ ...p, socketId: undefined })),
-    chain: room.chain.slice(-120),
+    chain: room.chain.slice(-180),
     chat: room.chat.slice(-MAX_CHAT_PER_ROOM),
+    events: room.events.slice(-MAX_EVENTS_PER_ROOM),
+    typing: room.typing && Date.now() - room.typing.updatedAt < TYPING_VISIBLE_MS ? room.typing : null,
     dictionaryMeta: { totalWords: dictionary.words.size, customWords: dictionary.customWords.size }
   };
 }

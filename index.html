@@ -100,7 +100,7 @@
             </div>
             <div class="chain-card panel-card">
               <div class="section-title row-between"><div><h3>Chuỗi từ</h3><p id="chainRuleText">Nối chữ cuối</p></div><span id="roundText" class="pill">Vòng 0</span></div>
-              <div id="chainWords" class="chain-words"></div>
+              <div id="chainWords" class="chain-words"></div><div class="chain-count" id="chainCountText">0 từ đã dùng</div>
             </div>
             <div class="input-card panel-card">
               <span class="label">Từ hiện tại</span><div id="lastWordText" class="last-word">---</div>
@@ -117,6 +117,19 @@
     </main>
   </div>
 
+  <div id="liveStatusPanel" class="live-status-panel hidden" aria-live="polite">
+    <div class="live-head">
+      <span class="live-dot"></span>
+      <strong id="liveTurnOwner">Đang chờ lượt</strong>
+      <span id="liveTimerMini">--s</span>
+    </div>
+    <div class="live-line">Từ hiện tại: <b id="liveCurrentWord">---</b> · cần chữ <b id="liveRequiredLetter">-</b></div>
+    <div id="liveTypingLine" class="live-typing">Chưa có ai đang nhập.</div>
+    <div id="liveEventLine" class="live-event-line">Chưa có sự kiện.</div>
+  </div>
+
+  <div id="scorePopupHost" class="score-popup-host" aria-live="polite"></div>
+
   <div id="turnOverlay" class="turn-overlay hidden" role="dialog" aria-modal="true">
     <div class="turn-overlay-card"><div class="turn-overlay-head"><div><span class="pill">Đến lượt</span><h3 id="overlayTurnTitle">Nhập từ nối tiếp</h3><p id="overlayRuleText">Từ cần nối đang tải...</p></div><div class="overlay-timer"><strong id="overlayTimerNumber">--</strong><span>giây</span></div></div><div class="progress-track"><div id="overlayTimerBar" class="progress-bar"></div></div><div id="overlayEvent" class="overlay-event hidden"></div><div class="overlay-current-word"><span>Từ hiện tại</span><strong id="overlayCurrentWord">---</strong></div><form id="overlayWordForm" class="overlay-word-form" autocomplete="off"><input id="overlayWordInput" type="text" minlength="3" maxlength="32" placeholder="Nhập từ tiếng Anh..." /><div class="overlay-actions"><button id="overlaySubmitBtn" class="primary-btn" type="submit">Nộp từ</button><button id="overlayPassBtn" class="danger-btn" type="button">Bỏ qua</button></div></form><div class="validation-hint">Bỏ qua lượt sẽ mất 1 điểm.</div></div>
   </div>
@@ -129,7 +142,7 @@
 
   <script>
     window.EWC_CONFIG = {
-      BACKEND_URL: "https://english-word-chain-render.onrender.com/",
+      BACKEND_URL: "https://english-word-chain-render.onrender.com",
       DICTIONARY_URL: "data/valid_words.json"
     };
   </script>
