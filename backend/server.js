@@ -19,6 +19,13 @@ const MAX_ROOMS_PUBLIC = 80;
 const MAX_EVENTS_PER_ROOM = 90;
 const TYPING_VISIBLE_MS = 2500;
 
+const BOT_PROFILES = {
+  easy: { label: "Trung bình", minDelay: 0.62, maxDelay: 0.88, mistakeRate: 0.34, passRate: 0.12, shortWordRate: 0.82, typoFixDelay: 1200 },
+  normal: { label: "Khá", minDelay: 0.46, maxDelay: 0.76, mistakeRate: 0.20, passRate: 0.06, shortWordRate: 0.62, typoFixDelay: 900 },
+  strong: { label: "Mạnh", minDelay: 0.28, maxDelay: 0.58, mistakeRate: 0.09, passRate: 0.025, shortWordRate: 0.38, typoFixDelay: 650 }
+};
+const BOT_PROFILE_POOL = ["easy", "easy", "normal", "normal", "strong"];
+
 const app = express();
 app.use(cors({ origin: CLIENT_ORIGIN === "*" ? true : CLIENT_ORIGIN.split(",").map(s => s.trim()) }));
 app.use(express.json({ limit: "2mb" }));
@@ -44,7 +51,7 @@ app.get("/health", (_req, res) => {
 });
 
 app.get("/dictionary-meta", (_req, res) => {
-  res.json({ ok: true, version: dictionary.version, totalWords: dictionary.words.size, customWords: dictionary.customWords.size });
+  res.json({ ok: true, version: dictionary.version, totalWords: dictionary.words.size, customWords: dictionary.customWords.size, meanings: dictionary.meanings.size });
 });
 
 io.on("connection", (socket) => {
@@ -179,12 +186,14 @@ io.on("connection", (socket) => {
     if (word.length < 3) throw new Error("Từ cần tối thiểu 3 chữ cái.");
     const topic = cleanTopic(payload?.topic || "Custom");
     const level = cleanLevel(payload?.level || "custom");
+    const viMeaning = cleanMeaning(payload?.viMeaning || payload?.meaning || "");
     dictionary.words.add(word);
     dictionary.customWords.add(word);
+    if (viMeaning) dictionary.meanings.set(word, viMeaning);
     dictionary.byFirstLetter.set(word[0], [...(dictionary.byFirstLetter.get(word[0]) || []), word]);
-    const saveResult = await tryPersistWordToGithub(word, topic, level);
-    io.emit("dictionary:customWord", { word, topic, level, totalWords: dictionary.words.size });
-    cbOk(cb, { word, topic, level, totalWords: dictionary.words.size, persisted: saveResult.persisted, note: saveResult.note });
+    const saveResult = await tryPersistWordToGithub(word, topic, level, viMeaning);
+    io.emit("dictionary:customWord", { word, topic, level, viMeaning, totalWords: dictionary.words.size });
+    cbOk(cb, { word, topic, level, viMeaning, totalWords: dictionary.words.size, persisted: saveResult.persisted, note: saveResult.note });
   }));
 
   socket.on("disconnect", () => {
@@ -211,7 +220,15 @@ function loadDictionary() {
   if (raw.wordsByLetter) Object.values(raw.wordsByLetter).forEach(list => Array.isArray(list) && list.forEach(add));
   if (Array.isArray(raw.customWords)) raw.customWords.forEach(add);
   if (Array.isArray(custom.customWords)) custom.customWords.forEach(add);
-  return { version: raw.version || "json", words, byFirstLetter, customWords: new Set(custom.customWords || []) };
+  const meanings = new Map();
+  const addMeaning = (word, meaning) => {
+    const w = normalizeWord(word);
+    const m = String(meaning || "").trim().slice(0, 80);
+    if (w.length >= 3 && m) meanings.set(w, m);
+  };
+  if (raw.viMeanings && typeof raw.viMeanings === "object") Object.entries(raw.viMeanings).forEach(([w, m]) => addMeaning(w, m));
+  if (custom.viMeanings && typeof custom.viMeanings === "object") Object.entries(custom.viMeanings).forEach(([w, m]) => addMeaning(w, m));
+  return { version: raw.version || "json", words, byFirstLetter, meanings, customWords: new Set(custom.customWords || []) };
 }
 
 function createRoom(roomCode, payload, hostId, nickname, avatar, socketId) {
@@ -223,7 +240,7 @@ function createRoom(roomCode, payload, hostId, nickname, avatar, socketId) {
     hostId,
     maxPlayers: clamp(payload.maxPlayers, 2, 12, 8),
     botCount: clamp(payload.botCount, 0, 3, 0),
-    turnSeconds: clamp(payload.turnSeconds, 2, 200, 15),
+    turnSeconds: clamp(payload.turnSeconds, 5, 90, 30),
     totalRounds: clamp(payload.totalRounds, 1, 99, 5),
     roundMode: payload.roundMode === "infinite" ? "infinite" : "finite",
     topic: cleanTopic(payload.topic || "All"),
@@ -281,12 +298,23 @@ function upsertHuman(room, playerId, nickname, avatar, socketId) {
 function addBot(room, n) {
   const id = makeId("BOT");
   const avatars = ["🤖", "🦊", "🐼", "🐯", "🧠"];
+  const names = ["Mochi Bot", "Pixel Bot", "Sunny Bot", "Nova Bot", "Bamboo Bot"];
+  const botSkill = pickBotSkill(room, n);
   const player = {
-    playerId: id, socketId: "", nickname: `Bot ${n}`, avatar: avatars[n % avatars.length], type: "bot", status: "active", connected: true,
+    playerId: id, socketId: "", nickname: names[(n - 1) % names.length], avatar: avatars[n % avatars.length], type: "bot", status: "active", connected: true,
+    botSkill, botSkillLabel: BOT_PROFILES[botSkill]?.label || "Khá",
     score: 0, validCount: 0, penalty: 0, team: n % 2 ? "B" : "A", orderIndex: room.playerOrder.length, joinedAt: Date.now(), lastSeenAt: Date.now()
   };
   room.players.set(id, player);
   room.playerOrder.push(id);
+}
+
+function pickBotSkill(room, n) {
+  const existing = [...room.players.values()].filter(p => p.type === "bot").map(p => p.botSkill);
+  if (n === 1) return Math.random() < 0.55 ? "normal" : "easy";
+  if (n === 2 && !existing.includes("easy")) return "easy";
+  if (n === 2 && !existing.includes("normal")) return "normal";
+  return BOT_PROFILE_POOL[Math.floor(Math.random() * BOT_PROFILE_POOL.length)] || "normal";
 }
 
 function assignTeam(room) {
@@ -337,18 +365,112 @@ function scheduleBotIfNeeded(room) {
   if (room.status !== "playing") return;
   const current = getCurrentActorPlayer(room);
   if (!current || current.type !== "bot") return;
-  const delay = Math.min(2500, Math.max(800, Math.floor(room.turnSeconds * 1000 * 0.22)));
-  setTimeout(() => {
-    const fresh = rooms.get(room.roomCode);
-    if (!fresh || fresh.status !== "playing") return;
-    const bot = getCurrentActorPlayer(fresh);
-    if (!bot || bot.playerId !== current.playerId) return;
-    const letter = requiredLetter(fresh);
-    const word = pickBotWord(letter, fresh.usedWords);
-    if (word) submitWord(fresh, bot, word, Date.now());
-    else passTurn(fresh, bot, true);
-    emitState(fresh.roomCode, fresh.lastEvent);
-  }, delay);
+  const profile = getBotProfile(current);
+  const delay = getBotDelayMs(room, profile);
+  const letter = requiredLetter(room);
+  const plannedWord = pickBotWord(letter, room.usedWords, profile);
+  scheduleBotTyping(room.roomCode, current.playerId, plannedWord || letter, Math.max(250, Math.floor(delay * 0.18)), delay);
+  setTimeout(() => botAct(room.roomCode, current.playerId), delay);
+}
+
+function botAct(roomCode, playerId) {
+  const room = rooms.get(roomCode);
+  if (!room || room.status !== "playing") return;
+  const bot = getCurrentActorPlayer(room);
+  if (!bot || bot.playerId !== playerId || bot.type !== "bot") return;
+  const profile = getBotProfile(bot);
+  const letter = requiredLetter(room);
+  const timeLeftMs = room.turnDeadlineAt - Date.now();
+  if (timeLeftMs <= 250) return;
+
+  if (Math.random() < profile.passRate) {
+    const result = passTurn(room, bot, true);
+    emitRoomEvents(room, result.events || []);
+    emitState(room.roomCode, result.message);
+    return;
+  }
+
+  const correctWord = pickBotWord(letter, room.usedWords, profile);
+  if (!correctWord) {
+    const result = passTurn(room, bot, true);
+    emitRoomEvents(room, result.events || []);
+    emitState(room.roomCode, result.message);
+    return;
+  }
+
+  if (Math.random() < profile.mistakeRate && timeLeftMs > profile.typoFixDelay + 900) {
+    const wrongWord = makeBotWrongWord(letter, correctWord, room.usedWords);
+    room.typing = makeTypingPayload(bot, wrongWord, room.turnDeadlineAt);
+    io.to(room.roomCode).emit("turn:typing", room.typing);
+    const invalid = invalidWord(room, bot, wrongWord, "Bot nhập nhầm, đang sửa lại.", Date.now());
+    emitRoomEvents(room, invalid.events || []);
+    emitState(room.roomCode, invalid.message);
+    setTimeout(() => {
+      const fresh = rooms.get(roomCode);
+      if (!fresh || fresh.status !== "playing") return;
+      const current = getCurrentActorPlayer(fresh);
+      if (!current || current.playerId !== playerId) return;
+      const retryWord = pickBotWord(requiredLetter(fresh), fresh.usedWords, profile) || correctWord;
+      const result = submitWord(fresh, current, retryWord, Date.now());
+      emitRoomEvents(fresh, result.events || []);
+      emitState(fresh.roomCode, result.message);
+    }, profile.typoFixDelay + Math.floor(Math.random() * 500));
+    return;
+  }
+
+  const result = submitWord(room, bot, correctWord, Date.now());
+  emitRoomEvents(room, result.events || []);
+  emitState(room.roomCode, result.message);
+}
+
+function getBotProfile(bot) {
+  return BOT_PROFILES[bot.botSkill] || BOT_PROFILES.normal;
+}
+
+function getBotDelayMs(room, profile) {
+  const min = Math.max(450, Math.floor(room.turnSeconds * 1000 * profile.minDelay));
+  const max = Math.max(min + 250, Math.floor(room.turnSeconds * 1000 * profile.maxDelay));
+  return Math.min(room.turnSeconds * 1000 - 450, min + Math.floor(Math.random() * (max - min + 1)));
+}
+
+function makeTypingPayload(player, draft, turnDeadlineAt) {
+  return {
+    playerId: player.playerId,
+    nickname: player.nickname,
+    avatar: player.avatar,
+    draft: normalizeWord(draft).slice(0, 32),
+    updatedAt: Date.now(),
+    turnDeadlineAt
+  };
+}
+
+function scheduleBotTyping(roomCode, playerId, targetWord, firstDelay, finalDelay) {
+  const word = normalizeWord(targetWord);
+  if (!word) return;
+  const steps = Math.min(word.length, 5);
+  const usable = Math.max(350, finalDelay - firstDelay - 220);
+  for (let i = 1; i <= steps; i++) {
+    const delay = firstDelay + Math.floor((usable * i) / (steps + 1));
+    setTimeout(() => {
+      const room = rooms.get(roomCode);
+      if (!room || room.status !== "playing") return;
+      const bot = getCurrentActorPlayer(room);
+      if (!bot || bot.playerId !== playerId || bot.type !== "bot") return;
+      const len = Math.max(1, Math.ceil((word.length * i) / steps));
+      room.typing = makeTypingPayload(bot, word.slice(0, len), room.turnDeadlineAt);
+      io.to(room.roomCode).emit("turn:typing", room.typing);
+    }, delay);
+  }
+}
+
+function makeBotWrongWord(letter, correctWord, usedWords) {
+  const wrongStarts = ["x", "z", "q", "v", "p"].filter(ch => ch !== letter);
+  if (Math.random() < 0.35) return `${wrongStarts[Math.floor(Math.random() * wrongStarts.length)] || "x"}${correctWord.slice(1)}`;
+  if (usedWords.size && Math.random() < 0.55) {
+    const used = [...usedWords].filter(w => w !== correctWord && w.length >= 3);
+    if (used.length) return used[Math.floor(Math.random() * used.length)];
+  }
+  return `${correctWord}${Math.random() < 0.5 ? "x" : "z"}`;
 }
 
 function onTurnTimeout(roomCode) {
@@ -366,6 +488,20 @@ function onTurnTimeout(roomCode) {
   if (finalEvent) events.push(finalEvent);
   emitRoomEvents(room, events);
   emitState(room.roomCode, room.lastEvent);
+}
+
+function getWordMeaning(word) {
+  return dictionary.meanings.get(normalizeWord(word)) || "";
+}
+
+function formatWordForLearning(word) {
+  const w = normalizeWord(word);
+  const meaning = getWordMeaning(w);
+  return meaning ? `${w} (${meaning})` : w;
+}
+
+function cleanMeaning(value) {
+  return String(value || "").trim().replace(/[<>]/g, "").slice(0, 80);
 }
 
 function submitWord(room, player, word, receivedAt) {
@@ -387,8 +523,10 @@ function submitWord(room, player, word, receivedAt) {
   room.currentWord = word;
   room.typing = null;
   room.chain.push({ id: makeId("W"), word, playerId: player.playerId, nickname: player.nickname, avatar: player.avatar, valid: true, scoreDelta, createdAt: Date.now() });
-  const msg = `Đúng: ${player.nickname} +${scoreDelta} điểm với từ “${word}”.`;
-  const events = [addRoomEvent(room, "score", msg, { playerId: player.playerId, nickname: player.nickname, avatar: player.avatar, word, scoreDelta, score: player.score })];
+  const viMeaning = getWordMeaning(word);
+  const displayWord = formatWordForLearning(word);
+  const msg = `Đúng: ${player.nickname} +${scoreDelta} điểm với từ “${displayWord}”.`;
+  const events = [addRoomEvent(room, "score", msg, { playerId: player.playerId, nickname: player.nickname, avatar: player.avatar, word, displayWord, viMeaning, scoreDelta, score: player.score })];
   const finalEvent = advanceTurn(room, msg);
   if (finalEvent) events.push(finalEvent);
   return { accepted: true, retry: false, scoreDelta, message: room.lastEvent, events };
@@ -493,13 +631,18 @@ function requiredLetter(room) {
   return room.chainRule === "first-letter" ? w[0] : w[w.length - 1];
 }
 
-function pickBotWord(letter, usedWords) {
+function pickBotWord(letter, usedWords, profile = BOT_PROFILES.normal) {
   const list = dictionary.byFirstLetter.get(letter) || [];
-  for (let i = 0; i < 50; i++) {
+  if (!list.length) return "";
+  const preferShort = Math.random() < profile.shortWordRate;
+  const maxLen = preferShort ? 7 : 11;
+  for (let i = 0; i < 80; i++) {
     const w = list[Math.floor(Math.random() * list.length)];
-    if (w && !usedWords.has(w)) return w;
+    if (!w || usedWords.has(w)) continue;
+    if (preferShort && w.length > maxLen) continue;
+    return w;
   }
-  return list.find(w => !usedWords.has(w)) || "";
+  return list.find(w => !usedWords.has(w) && (!preferShort || w.length <= maxLen)) || list.find(w => !usedWords.has(w)) || "";
 }
 
 function winnerText(room) {
@@ -702,12 +845,12 @@ function makeRoomCode() {
   throw new Error("Không tạo được mã phòng.");
 }
 
-async function tryPersistWordToGithub(word, topic, level) {
+async function tryPersistWordToGithub(word, topic, level, viMeaning = "") {
   const token = process.env.GITHUB_TOKEN;
   const owner = process.env.GITHUB_OWNER;
   const repo = process.env.GITHUB_REPO;
   const branch = process.env.GITHUB_BRANCH || "main";
-  const dictPath = process.env.GITHUB_DICT_PATH || "frontend/data/valid_words.json";
+  const dictPath = process.env.GITHUB_DICT_PATH || "data/valid_words.json";
   if (!token || !owner || !repo) return { persisted: false, note: "Đã thêm tạm vào server. Muốn lưu vĩnh viễn, cấu hình GITHUB_TOKEN trên Render hoặc sửa JSON thủ công." };
   try {
     const url = `https://api.github.com/repos/${owner}/${repo}/contents/${dictPath}?ref=${encodeURIComponent(branch)}`;
