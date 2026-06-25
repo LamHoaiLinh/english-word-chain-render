@@ -164,7 +164,7 @@
       playerId: state.playerId, nickname, avatar,
       roomName: sanitizeTopic($("roomName").value || `${nickname} - Nối từ`), roomPassword: $("roomPassword").value.trim(),
       maxPlayers: clamp($("maxPlayers").value, 2, 12, 8), botCount: clamp($("botCount").value, 0, 3, 0),
-      turnSeconds: clamp($("turnSeconds").value, 15, 90, 30), totalRounds: clamp($("totalRounds").value, 1, 99, 4),
+      turnSeconds: clamp($("turnSeconds").value, 2, 200, 15), totalRounds: clamp($("totalRounds").value, 1, 99, 4),
       roundMode: $("infiniteMode").checked ? "infinite" : "finite", topic: $("topicSelect").value,
       chainRule: $("chainRule").value, mode: $("gameMode").value
     };
