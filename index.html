@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="vi" data-theme="light">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Nối Từ Tiếng Anh Realtime</title>
+  <meta name="description" content="Game nối từ tiếng Anh realtime dùng GitHub Pages + Render + Socket.IO." />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="logo">🔗</div>
+        <div><h1>Nối Từ Tiếng Anh</h1><p>Realtime · GitHub + Render</p></div>
+      </div>
+      <div class="top-actions">
+        <button id="addWordBtn" class="soft-btn" type="button">Thêm từ</button>
+        <button id="soundToggle" class="icon-btn" type="button" title="Bật/tắt âm thanh">🔊</button>
+        <button id="themeToggle" class="icon-btn" type="button" title="Đổi sáng/tối">🌙</button>
+        <button id="configBtn" class="soft-btn" type="button">Cấu hình</button>
+      </div>
+    </header>
+
+    <main>
+      <section id="lobbyScreen" class="screen lobby-screen">
+        <div class="hero-card glass-card">
+          <div class="hero-copy">
+            <span id="connectionBadge" class="pill danger">Chưa kết nối server</span>
+            <h2>Chơi nối từ tiếng Anh realtime, không dùng Google Sheet.</h2>
+            <p>Phòng, lượt chơi, chat và điểm số chạy qua Render WebSocket. Từ điển JSON đặt trong GitHub để kiểm tra nhanh.</p>
+          </div>
+          <div class="hero-art" aria-hidden="true">
+            <div class="word-bubble b1">apple</div><div class="word-bubble b2">energy</div><div class="word-bubble b3">yellow</div><div class="word-bubble b4">window</div>
+          </div>
+        </div>
+
+        <div class="open-rooms panel-card">
+          <div class="section-title row-between">
+            <div><h3>Phòng đang mở</h3><p>Bấm vào phòng để điền mã tự động. Phòng có khóa cần nhập mật khẩu.</p></div>
+            <button id="refreshRoomsBtn" class="soft-btn" type="button">Làm mới</button>
+          </div>
+          <div id="openRoomsList" class="open-rooms-list">Chưa kết nối server.</div>
+        </div>
+
+        <div class="lobby-grid">
+          <form id="createForm" class="panel-card" autocomplete="off">
+            <div class="section-title"><h3>Tạo phòng</h3><p>Thiết lập luật chơi trước khi mời người khác.</p></div>
+            <label class="field"><span>Tên phòng</span><input id="roomName" type="text" maxlength="50" placeholder="Ví dụ: Phòng tối nay" /></label>
+            <label class="field"><span>Mật khẩu phòng nếu cần</span><input id="roomPassword" type="password" maxlength="24" placeholder="Bỏ trống nếu công khai" /></label>
+            <label class="field"><span>Nickname chủ phòng</span><input id="hostNick" type="text" maxlength="24" placeholder="Ví dụ: Linh" required /></label>
+            <label class="field"><span>Avatar</span><select id="hostAvatar"></select></label>
+            <div class="form-row">
+              <label class="field"><span>Số người tối đa</span><input id="maxPlayers" type="number" min="2" max="12" value="8" required /></label>
+              <label class="field"><span>Số bot</span><input id="botCount" type="number" min="0" max="3" value="1" required /></label>
+            </div>
+            <div class="form-row">
+              <label class="field"><span>Thời gian mỗi lượt</span><input id="turnSeconds" type="number" min="15" max="90" value="30" required /></label>
+              <label class="field"><span>Số vòng</span><input id="totalRounds" type="number" min="1" max="99" value="4" required /></label>
+            </div>
+            <label class="toggle-line"><input id="infiniteMode" type="checkbox" /><span>Chơi vô hạn</span></label>
+            <label class="field"><span>Chủ đề</span><select id="topicSelect"><option>All</option><option>General</option><option>Animals</option><option>Food</option><option>Technology</option><option>Business</option><option>Education</option></select></label>
+            <label class="field"><span>Kiểu nối</span><select id="chainRule"><option value="last-letter">Nối chữ cái cuối của từ trước</option><option value="first-letter">Nối chữ cái đầu của từ trước</option></select></label>
+            <label class="field"><span>Chế độ</span><select id="gameMode"><option value="solo">Đấu cá nhân</option><option value="team">Team Battle</option></select></label>
+            <button class="primary-btn" type="submit">Tạo Phòng</button>
+            <div class="mini-help">Số vòng đúng nghĩa: nếu có 5 người và chọn 4 vòng thì cần hết 5 lượt mới tính xong 1 vòng.</div>
+          </form>
+
+          <form id="joinForm" class="panel-card" autocomplete="off">
+            <div class="section-title"><h3>Vào phòng</h3><p>Nhập mã phòng hoặc bấm phòng đang mở.</p></div>
+            <label class="field"><span>Room Code</span><input id="joinRoomCode" type="text" maxlength="6" placeholder="ABC123" required /></label>
+            <label class="field"><span>Mật khẩu phòng nếu có</span><input id="joinRoomPassword" type="password" maxlength="24" placeholder="Chỉ nhập nếu phòng có khóa" /></label>
+            <label class="field"><span>Nickname</span><input id="joinNick" type="text" maxlength="24" placeholder="Tên hiển thị" required /></label>
+            <label class="field"><span>Avatar</span><select id="joinAvatar"></select></label>
+            <button class="primary-btn" type="submit">Join</button>
+            <div class="mini-help"><strong>Từ điển:</strong> <span id="dictStatus">đang tải...</span></div>
+          </form>
+        </div>
+      </section>
+
+      <section id="roomScreen" class="screen room-screen hidden">
+        <div class="room-header glass-card">
+          <div class="room-meta"><div class="room-code-box"><span>Room Code</span><strong id="roomCodeText">------</strong></div><button id="copyLinkBtn" class="soft-btn" type="button">Copy link mời</button></div>
+          <div class="room-status"><span id="roomModeBadge" class="pill">Đấu cá nhân</span><span id="playersCountText" class="pill">0/12 người</span><button id="leaveBtn" class="danger-btn" type="button">Thoát</button></div>
+        </div>
+
+        <div id="preGamePanel" class="pre-game panel-card hidden">
+          <div><h3>Phòng chờ</h3><p id="preGameHint">Chủ phòng bấm bắt đầu khi mọi người sẵn sàng.</p></div>
+          <div id="teamChooser" class="team-chooser hidden"><span>Chọn đội:</span><button data-team="A" class="soft-btn team-btn" type="button">Đội A</button><button data-team="B" class="soft-btn team-btn" type="button">Đội B</button></div>
+          <button id="startGameBtn" class="primary-btn hidden" type="button">Bắt đầu</button>
+        </div>
+
+        <div class="game-layout">
+          <section class="play-area">
+            <div class="turn-card glass-card">
+              <div class="turn-topline"><div><span class="label">Đến lượt</span><h2 id="turnOwnerText">Đang tải...</h2></div><div class="timer-wrap"><div id="timerNumber" class="timer-number">--</div><div class="timer-label">giây</div></div></div>
+              <div class="progress-track"><div id="timerBar" class="progress-bar"></div></div>
+              <div id="turnMessage" class="turn-message">Chờ dữ liệu phòng...</div>
+              <div id="eventBanner" class="event-banner hidden"></div>
+            </div>
+            <div class="chain-card panel-card">
+              <div class="section-title row-between"><div><h3>Chuỗi từ</h3><p id="chainRuleText">Nối chữ cuối</p></div><span id="roundText" class="pill">Vòng 0</span></div>
+              <div id="chainWords" class="chain-words"></div>
+            </div>
+            <div class="input-card panel-card">
+              <span class="label">Từ hiện tại</span><div id="lastWordText" class="last-word">---</div>
+              <form id="wordForm" class="word-form" autocomplete="off"><input id="wordInput" type="text" minlength="3" maxlength="32" placeholder="Nhập từ tiếng Anh..." /><button id="submitWordBtn" class="primary-btn" type="submit">Submit</button><button id="passTurnBtn" class="soft-btn" type="button">Bỏ qua</button></form>
+              <div id="validationHint" class="validation-hint">Trình duyệt kiểm tra nhanh trước, server xác nhận lượt và điểm.</div>
+            </div>
+          </section>
+          <aside class="side-area">
+            <div class="score-card panel-card"><div class="section-title"><h3>Bảng xếp hạng</h3><p>Realtime từ Render.</p></div><div id="teamScoreBox" class="team-score-box hidden"></div><div id="playersList" class="players-list"></div></div>
+            <div class="chat-card panel-card"><div class="section-title row-between"><div><h3>Chat nhanh</h3><p>Không ghi Google Sheet.</p></div></div><div id="chatList" class="chat-list"></div><form id="chatForm" class="chat-form" autocomplete="off"><input id="chatInput" type="text" maxlength="220" placeholder="Nhập tin nhắn..." /><button class="soft-btn" type="submit">Gửi</button></form><div id="reactionBar" class="reaction-bar"></div></div>
+          </aside>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="turnOverlay" class="turn-overlay hidden" role="dialog" aria-modal="true">
+    <div class="turn-overlay-card"><div class="turn-overlay-head"><div><span class="pill">Đến lượt</span><h3 id="overlayTurnTitle">Nhập từ nối tiếp</h3><p id="overlayRuleText">Từ cần nối đang tải...</p></div><div class="overlay-timer"><strong id="overlayTimerNumber">--</strong><span>giây</span></div></div><div class="progress-track"><div id="overlayTimerBar" class="progress-bar"></div></div><div id="overlayEvent" class="overlay-event hidden"></div><div class="overlay-current-word"><span>Từ hiện tại</span><strong id="overlayCurrentWord">---</strong></div><form id="overlayWordForm" class="overlay-word-form" autocomplete="off"><input id="overlayWordInput" type="text" minlength="3" maxlength="32" placeholder="Nhập từ tiếng Anh..." /><div class="overlay-actions"><button id="overlaySubmitBtn" class="primary-btn" type="submit">Nộp từ</button><button id="overlayPassBtn" class="danger-btn" type="button">Bỏ qua</button></div></form><div class="validation-hint">Bỏ qua lượt sẽ mất 1 điểm.</div></div>
+  </div>
+
+  <div id="configModal" class="modal hidden" role="dialog" aria-modal="true"><div class="modal-card"><div class="section-title"><h3>Cấu hình Render Backend</h3><p>Dán URL Render backend, ví dụ: https://ten-app.onrender.com</p></div><label class="field"><span>Backend URL</span><input id="backendUrlInput" type="url" placeholder="https://your-app.onrender.com" /></label><div class="modal-actions"><button id="saveConfigBtn" class="primary-btn" type="button">Lưu</button><button id="closeConfigBtn" class="soft-btn" type="button">Đóng</button></div></div></div>
+
+  <div id="addWordModal" class="modal hidden" role="dialog" aria-modal="true"><div class="modal-card"><div class="section-title"><h3>Thêm từ vào từ điển</h3><p>Từ được gửi về Render. Nếu Render có cấu hình GitHub token thì từ sẽ được lưu vĩnh viễn vào JSON.</p></div><label class="field"><span>Từ tiếng Anh</span><input id="newWordInput" type="text" maxlength="32" placeholder="bookkeeping" /></label><label class="field"><span>Topic</span><input id="newWordTopic" type="text" maxlength="50" value="Custom" /></label><label class="field"><span>Level</span><select id="newWordLevel"><option value="basic">basic</option><option value="intermediate">intermediate</option><option value="advanced">advanced</option><option value="custom" selected>custom</option></select></label><label class="field"><span>Mật khẩu quản trị</span><input id="adminPasswordInput" type="password" maxlength="80" placeholder="Nhập mật khẩu" /></label><div class="modal-actions"><button id="saveWordBtn" class="primary-btn" type="button">Thêm từ</button><button id="closeAddWordBtn" class="soft-btn" type="button">Đóng</button></div></div></div>
+
+  <div id="toastHost" class="toast-host"></div><div id="floatingHost" class="floating-host" aria-hidden="true"></div>
+
+  <script>
+    window.EWC_CONFIG = {
+      BACKEND_URL: "",
+      DICTIONARY_URL: "data/valid_words.json"
+    };
+  </script>
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+  <script src="game.js"></script>
+</body>
+</html>
