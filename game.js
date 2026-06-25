@@ -19,6 +19,7 @@
     chain: [],
     chat: [],
     dictSet: new Set(),
+    meanings: new Map(),
     dictLoaded: false,
     lastVersion: 0,
     countdownTimer: null,
@@ -90,6 +91,11 @@
       if (Array.isArray(data.words)) data.words.forEach(add);
       if (Array.isArray(data.customWords)) data.customWords.forEach(add);
       if (data.wordsByLetter) Object.values(data.wordsByLetter).forEach(list => Array.isArray(list) && list.forEach(add));
+      if (data.viMeanings && typeof data.viMeanings === "object") Object.entries(data.viMeanings).forEach(([w, m]) => {
+        w = normalizeWord(w);
+        m = String(m || "").trim();
+        if (w.length >= 3 && m) state.meanings.set(w, m);
+      });
       state.dictLoaded = true;
       $("dictStatus").textContent = `đã tải ${state.dictSet.size.toLocaleString("vi-VN")} từ`;
     } catch (err) {
@@ -144,7 +150,11 @@
     s.on("turn:typing", typing => { state.typing = typing || null; renderLiveStatusPanel(); });
     s.on("chat:update", data => { state.chat = data.chat || []; renderChat(); });
     s.on("reaction:new", data => spawnReaction(data.emoji || "👏"));
-    s.on("dictionary:customWord", data => { if (data?.word) state.dictSet.add(data.word); $("dictStatus").textContent = `đã tải ${state.dictSet.size.toLocaleString("vi-VN")} từ`; });
+    s.on("dictionary:customWord", data => {
+      if (data?.word) state.dictSet.add(data.word);
+      if (data?.word && data?.viMeaning) state.meanings.set(data.word, data.viMeaning);
+      $("dictStatus").textContent = `đã tải ${state.dictSet.size.toLocaleString("vi-VN")} từ`;
+    });
   }
 
   function setConnection(ok, text) {
@@ -164,7 +174,7 @@
       playerId: state.playerId, nickname, avatar,
       roomName: sanitizeTopic($("roomName").value || `${nickname} - Nối từ`), roomPassword: $("roomPassword").value.trim(),
       maxPlayers: clamp($("maxPlayers").value, 2, 12, 8), botCount: clamp($("botCount").value, 0, 3, 0),
-      turnSeconds: clamp($("turnSeconds").value, 2, 200, 15), totalRounds: clamp($("totalRounds").value, 1, 99, 4),
+      turnSeconds: clamp($("turnSeconds").value, 5, 90, 30), totalRounds: clamp($("totalRounds").value, 1, 99, 4),
       roundMode: $("infiniteMode").checked ? "infinite" : "finite", topic: $("topicSelect").value,
       chainRule: $("chainRule").value, mode: $("gameMode").value
     };
@@ -265,11 +275,13 @@
     const topic = sanitizeTopic($("newWordTopic").value || "Custom");
     const level = $("newWordLevel").value;
     const password = $("adminPasswordInput").value;
+    const viMeaning = sanitizeMeaning($("newWordMeaning")?.value || "");
     if (!word || word.length < 3) return toast("Từ cần tối thiểu 3 chữ cái.", "error");
     try {
-      const res = await emit("word:addCustom", { word, topic, level, password }, 12000);
+      const res = await emit("word:addCustom", { word, topic, level, viMeaning, password }, 12000);
       state.dictSet.add(res.word);
-      $("newWordInput").value = ""; $("adminPasswordInput").value = "";
+      if (res.viMeaning) state.meanings.set(res.word, res.viMeaning);
+      $("newWordInput").value = ""; if ($("newWordMeaning")) $("newWordMeaning").value = ""; $("adminPasswordInput").value = "";
       $("addWordModal").classList.add("hidden");
       toast(res.persisted ? `Đã thêm và lưu JSON: ${res.word}` : `Đã thêm tạm: ${res.word}. ${res.note || ""}`, res.persisted ? "success" : "info", 5200);
       $("dictStatus").textContent = `đã tải ${state.dictSet.size.toLocaleString("vi-VN")} từ`;
