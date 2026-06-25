@@ -223,7 +223,7 @@ function createRoom(roomCode, payload, hostId, nickname, avatar, socketId) {
     hostId,
     maxPlayers: clamp(payload.maxPlayers, 2, 12, 8),
     botCount: clamp(payload.botCount, 0, 3, 0),
-    turnSeconds: clamp(payload.turnSeconds, 15, 90, 30),
+    turnSeconds: clamp(payload.turnSeconds, 2, 200, 15),
     totalRounds: clamp(payload.totalRounds, 1, 99, 5),
     roundMode: payload.roundMode === "infinite" ? "infinite" : "finite",
     topic: cleanTopic(payload.topic || "All"),
